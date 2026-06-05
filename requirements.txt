@@ -1,8 +1,8 @@
 streamlit
 pandas
 Pillow
-pyzbar
+pyrxing
 easyocr
 google-generativeai
 openpyxl
-opencv-python
+numpy
