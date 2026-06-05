@@ -1,0 +1,8 @@
+streamlit
+pandas
+Pillow
+pyzbar
+easyocr
+google-generativeai
+openpyxl
+opencv-python
