@@ -11,7 +11,12 @@ import json
 import re
 
 # ------------------- الإعدادات -------------------
-GEMINI_API_KEY = "AQ.Ab8RN6JhfkdXH0unMAtAecnRZyf65xx6YFH1J61ChtiO5Xma5Q"  # ضع مفتاحك هنا
+# GEMINI_API_KEY = "YOUR_GEMINI_API_KEY"  <-- يمكنك حذف هذا السطر أو تعليقه
+import streamlit as st
+
+# اقرأ المفتاح من مكان آمن
+GEMINI_API_KEY = st.secrets["GEMINI_API_KEY"]
+
 genai.configure(api_key=GEMINI_API_KEY)
 
 @st.cache_resource
