@@ -1,9 +1,9 @@
-# app.py - النسخة النهائية المعدلة
+# app.py - النسخة المستقرة بالكامل
 import streamlit as st
 import pandas as pd
 from io import BytesIO
 from PIL import Image, ImageEnhance
-import zxingcpp  # المكتبة الجديدة لقراءة الباركود
+import zxingcpp
 import google.generativeai as genai
 import json
 import re
@@ -12,32 +12,24 @@ import re
 GEMINI_API_KEY = st.secrets["GEMINI_API_KEY"]
 genai.configure(api_key=GEMINI_API_KEY)
 
-# ------------------- دوال قوية -------------------
+# ------------------- دوال المعالجة -------------------
 def scan_barcode_advanced(image):
-    """قراءة باركود باستخدام zxing-cpp (تعمل على السحابة)"""
     try:
-        # تحسين الصورة للقراءة
         gray = image.convert('L')
         enhancer = ImageEnhance.Contrast(gray)
         enhanced = enhancer.enhance(2.5)
-        # تكبير الصورة
         enlarged = enhanced.resize((int(enhanced.width*1.5), int(enhanced.height*1.5)), Image.Resampling.LANCZOS)
-        
-        # قراءة الباركود
         results = zxingcpp.read_barcodes(enlarged)
         if results:
             return results[0].text.strip()
-        
-        # محاولة ثانية من الصورة الأصلية
         results = zxingcpp.read_barcodes(image)
         if results:
             return results[0].text.strip()
-    except Exception as e:
-        st.warning(f"خطأ في قراءة الباركود: {e}")
+    except:
+        pass
     return None
 
 def analyze_with_gemini(product_img, price_tag_img):
-    """Gemini يحلل المنتج ويقرأ ملصق السعر إن وجد"""
     prompt = """
     أنت خبير في المنتجات الإلكترونية. أخرج JSON فقط:
     {
@@ -45,8 +37,8 @@ def analyze_with_gemini(product_img, price_tag_img):
         "brand": "العلامة التجارية",
         "category": "Laptop/Printer/Accessory/Mobile Accessory",
         "description": "وصف قصير (أقل من 10 كلمات)",
-        "sku": "SKU مقترح مثل LAP-001",
-        "price_from_label": "السعر المستخرج من الصورة الثانية (إن وجد، وإلا '')"
+        "sku": "SKU مقترح",
+        "price_from_label": "السعر"
     }
     """
     try:
@@ -59,8 +51,8 @@ def analyze_with_gemini(product_img, price_tag_img):
         json_match = re.search(r'\{.*\}', raw, re.DOTALL)
         if json_match:
             return json.loads(json_match.group())
-    except Exception as e:
-        st.error(f"Gemini error: {e}")
+    except:
+        pass
     return {}
 
 def create_excel(inventory):
@@ -77,57 +69,94 @@ def create_excel(inventory):
         df.to_excel(writer, index=False, sheet_name='Inventory')
     return output.getvalue()
 
-# ------------------- واجهة المستخدم السلسة -------------------
+def reset_app():
+    """دالة واحدة لإعادة ضبط كل شيء"""
+    st.session_state.step = 0
+    st.session_state.temp_images = [None, None, None]
+    st.session_state.quantity = 1
+    st.session_state.processed = False
+    st.session_state.inventory_updated = False
+
+# ------------------- واجهة المستخدم -------------------
 st.set_page_config(page_title="AI Inventory Scanner", page_icon="📷", layout="centered")
 st.title("📷 AI Inventory Scanner - الإصدار الاحترافي")
 st.markdown("التقط 3 صور: **المنتج** ← **الباركود** ← **ملصق السعر**، ثم أدخل الكمية.")
 
-# حالة الجلسة
+# تهيئة حالة الجلسة
 if 'inventory' not in st.session_state:
     st.session_state.inventory = []
 if 'step' not in st.session_state:
-    st.session_state.step = 0  # 0:منتج, 1:باركود, 2:سعر, 3:كمية
+    st.session_state.step = 0
 if 'temp_images' not in st.session_state:
     st.session_state.temp_images = [None, None, None]
 if 'quantity' not in st.session_state:
     st.session_state.quantity = 1
 if 'processed' not in st.session_state:
-    st.session_state.processed = False  # منع إعادة المعالجة
+    st.session_state.processed = False
+if 'inventory_updated' not in st.session_state:
+    st.session_state.inventory_updated = False
 
 # زر Excel
-if st.session_state.inventory:
-    excel_data = create_excel(st.session_state.inventory)
-    if excel_data:
-        st.download_button("📥 تحميل Excel", data=excel_data, file_name="inventory.xlsx")
+col1, col2 = st.columns([3, 1])
+with col2:
+    if st.session_state.inventory:
+        excel_data = create_excel(st.session_state.inventory)
+        if excel_data:
+            st.download_button("📥 تحميل Excel", data=excel_data, file_name="inventory.xlsx", key="excel_top")
+    else:
+        st.button("📥 Excel", disabled=True)
 st.divider()
 
-# ------------------- الخطوات السلسة -------------------
-if st.session_state.step < 3:
-    step_names = ["📦 صورة المنتج", "📊 صورة الباركود (قرّب الكاميرا)", "🏷️ صورة ملصق السعر"]
-    st.subheader(step_names[st.session_state.step])
-    
-    img = st.camera_input("التقط الصورة", key=f"cam_{st.session_state.step}")
-    
-    if img is not None:
+# ------------------- عرض المنتجات المضافة أثناء العمل -------------------
+if st.session_state.inventory and st.session_state.step < 4:
+    st.info(f"✅ تم إضافة {len(st.session_state.inventory)} منتج حتى الآن")
+    st.divider()
+
+# ------------------- الخطوات -------------------
+if st.session_state.step == 0:
+    st.subheader("📦 صورة المنتج")
+    img = st.camera_input("التقط الصورة", key="cam_product")
+    if img:
         pil_img = Image.open(img)
         pil_img.thumbnail((1024, 1024), Image.Resampling.LANCZOS)
-        st.session_state.temp_images[st.session_state.step] = pil_img
-        st.success("✅ تم الالتقاط! اضغط 'التالي'")
-        
+        st.session_state.temp_images[0] = pil_img
+        st.success("✅ تم الالتقاط!")
         if st.button("➡️ التالي"):
-            st.session_state.step += 1
+            st.session_state.step = 1
             st.rerun()
 
-# ------------------- إدخال الكمية -------------------
+elif st.session_state.step == 1:
+    st.subheader("📊 صورة الباركود (قرّب الكاميرا)")
+    img = st.camera_input("التقط الصورة", key="cam_barcode")
+    if img:
+        pil_img = Image.open(img)
+        pil_img.thumbnail((1024, 1024), Image.Resampling.LANCZOS)
+        st.session_state.temp_images[1] = pil_img
+        st.success("✅ تم الالتقاط!")
+        if st.button("➡️ التالي"):
+            st.session_state.step = 2
+            st.rerun()
+
+elif st.session_state.step == 2:
+    st.subheader("🏷️ صورة ملصق السعر")
+    img = st.camera_input("التقط الصورة", key="cam_price")
+    if img:
+        pil_img = Image.open(img)
+        pil_img.thumbnail((1024, 1024), Image.Resampling.LANCZOS)
+        st.session_state.temp_images[2] = pil_img
+        st.success("✅ تم الالتقاط!")
+        if st.button("➡️ التالي"):
+            st.session_state.step = 3
+            st.rerun()
+
 elif st.session_state.step == 3:
     st.subheader("🔢 أدخل كمية المنتج")
-    quantity = st.number_input("الكمية المتوفرة:", min_value=0, step=1, value=1)
+    quantity = st.number_input("الكمية المتوفرة:", min_value=0, step=1, value=1, key="quantity_input")
     if st.button("✅ تأكيد وتحليل المنتج"):
         st.session_state.quantity = quantity
         st.session_state.step = 4
         st.rerun()
 
-# ------------------- المعالجة (مرة واحدة فقط) -------------------
 elif st.session_state.step == 4 and not st.session_state.processed:
     st.subheader("🔍 جاري التحليل...")
     prod_img = st.session_state.temp_images[0]
@@ -138,20 +167,18 @@ elif st.session_state.step == 4 and not st.session_state.processed:
         barcode = scan_barcode_advanced(bar_img) if bar_img else None
         ai_result = analyze_with_gemini(prod_img, price_img)
     
-    # عرض النتائج
-    col1, col2 = st.columns(2)
-    with col1:
-        st.image(prod_img, width=150)
-    with col2:
+    col_left, col_right = st.columns(2)
+    with col_left:
+        st.image(prod_img, caption="المنتج", width=150)
+    with col_right:
         if ai_result:
             st.json(ai_result)
     
-    if not barcode:
-        st.warning("⚠️ الباركود لم يُقرأ. تأكد من تقريب الكاميرا وإضاءة جيدة.")
-    else:
+    if barcode:
         st.success(f"✅ الباركود: {barcode}")
+    else:
+        st.warning("⚠️ الباركود لم يُقرأ. تأكد من تقريب الكاميرا وإضاءة جيدة.")
     
-    # حفظ المنتج
     new_item = {
         "SKU": ai_result.get('sku', 'ERR') if ai_result else 'ERR',
         "Product Name": ai_result.get('product_name', 'غير معروف') if ai_result else 'غير معروف',
@@ -164,20 +191,22 @@ elif st.session_state.step == 4 and not st.session_state.processed:
         "Confidence": "85%"
     }
     st.session_state.inventory.append(new_item)
-    st.session_state.processed = True  # منع إعادة المعالجة
+    st.session_state.processed = True
+    st.session_state.inventory_updated = True
+    
+    # عرض المنتجات المضافة
+    st.subheader(f"📋 تم إضافة {len(st.session_state.inventory)} منتج")
+    st.dataframe(pd.DataFrame(st.session_state.inventory))
     
     # زر منتج آخر
     if st.button("➕ منتج آخر"):
-        st.session_state.step = 0
-        st.session_state.temp_images = [None, None, None]
-        st.session_state.quantity = 1
-        st.session_state.processed = False
+        reset_app()
         st.rerun()
-    
-    st.divider()
+
+# ------------------- عرض النتائج إذا انتهى التحليل -------------------
+if st.session_state.step == 4 and st.session_state.processed and not st.session_state.inventory_updated:
     st.subheader(f"📋 تم إضافة {len(st.session_state.inventory)} منتج")
     st.dataframe(pd.DataFrame(st.session_state.inventory))
-
-# ------------------- عرض المنتجات أثناء العمل -------------------
-if 0 < st.session_state.step < 4 and st.session_state.inventory:
-    st.info(f"✅ تم إضافة {len(st.session_state.inventory)} منتج حتى الآن")
+    if st.button("➕ منتج آخر"):
+        reset_app()
+        st.rerun()
