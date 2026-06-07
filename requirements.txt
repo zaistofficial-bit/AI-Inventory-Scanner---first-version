@@ -1,7 +1,7 @@
 streamlit
 pandas
 Pillow
-pyrxing
+zxing-cpp
 easyocr
 google-generativeai
 openpyxl
