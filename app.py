@@ -1,9 +1,9 @@
-# app.py - النسخة السلسة مع جميع الميزات الجديدة
+# app.py - النسخة النهائية المعدلة
 import streamlit as st
 import pandas as pd
 from io import BytesIO
 from PIL import Image, ImageEnhance
-from pyrxing import read_barcode
+import zxingcpp  # المكتبة الجديدة لقراءة الباركود
 import google.generativeai as genai
 import json
 import re
@@ -14,7 +14,7 @@ genai.configure(api_key=GEMINI_API_KEY)
 
 # ------------------- دوال قوية -------------------
 def scan_barcode_advanced(image):
-    """قراءة باركود حتى لو كان صغيراً جداً"""
+    """قراءة باركود باستخدام zxing-cpp (تعمل على السحابة)"""
     try:
         # تحسين الصورة للقراءة
         gray = image.convert('L')
@@ -22,14 +22,18 @@ def scan_barcode_advanced(image):
         enhanced = enhancer.enhance(2.5)
         # تكبير الصورة
         enlarged = enhanced.resize((int(enhanced.width*1.5), int(enhanced.height*1.5)), Image.Resampling.LANCZOS)
-        result = read_barcode(enlarged)
-        if result and result.text:
-            return result.text.strip()
-        result = read_barcode(image)
-        if result and result.text:
-            return result.text.strip()
-    except:
-        pass
+        
+        # قراءة الباركود
+        results = zxingcpp.read_barcodes(enlarged)
+        if results:
+            return results[0].text.strip()
+        
+        # محاولة ثانية من الصورة الأصلية
+        results = zxingcpp.read_barcodes(image)
+        if results:
+            return results[0].text.strip()
+    except Exception as e:
+        st.warning(f"خطأ في قراءة الباركود: {e}")
     return None
 
 def analyze_with_gemini(product_img, price_tag_img):
@@ -87,6 +91,8 @@ if 'temp_images' not in st.session_state:
     st.session_state.temp_images = [None, None, None]
 if 'quantity' not in st.session_state:
     st.session_state.quantity = 1
+if 'processed' not in st.session_state:
+    st.session_state.processed = False  # منع إعادة المعالجة
 
 # زر Excel
 if st.session_state.inventory:
@@ -100,7 +106,6 @@ if st.session_state.step < 3:
     step_names = ["📦 صورة المنتج", "📊 صورة الباركود (قرّب الكاميرا)", "🏷️ صورة ملصق السعر"]
     st.subheader(step_names[st.session_state.step])
     
-    # كاميرا مباشرة (بدون أزرار إضافية)
     img = st.camera_input("التقط الصورة", key=f"cam_{st.session_state.step}")
     
     if img is not None:
@@ -109,7 +114,6 @@ if st.session_state.step < 3:
         st.session_state.temp_images[st.session_state.step] = pil_img
         st.success("✅ تم الالتقاط! اضغط 'التالي'")
         
-        # زر التالي مباشرة (هذا كان يعمل بشكل سلس في الأصل)
         if st.button("➡️ التالي"):
             st.session_state.step += 1
             st.rerun()
@@ -123,8 +127,8 @@ elif st.session_state.step == 3:
         st.session_state.step = 4
         st.rerun()
 
-# ------------------- المعالجة -------------------
-elif st.session_state.step == 4:
+# ------------------- المعالجة (مرة واحدة فقط) -------------------
+elif st.session_state.step == 4 and not st.session_state.processed:
     st.subheader("🔍 جاري التحليل...")
     prod_img = st.session_state.temp_images[0]
     bar_img = st.session_state.temp_images[1]
@@ -160,12 +164,14 @@ elif st.session_state.step == 4:
         "Confidence": "85%"
     }
     st.session_state.inventory.append(new_item)
+    st.session_state.processed = True  # منع إعادة المعالجة
     
     # زر منتج آخر
     if st.button("➕ منتج آخر"):
         st.session_state.step = 0
         st.session_state.temp_images = [None, None, None]
         st.session_state.quantity = 1
+        st.session_state.processed = False
         st.rerun()
     
     st.divider()
