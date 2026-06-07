@@ -2,7 +2,5 @@ streamlit
 pandas
 openpyxl
 Pillow
-opencv-python-headless
 pyzbar
 google-generativeai
-numpy
