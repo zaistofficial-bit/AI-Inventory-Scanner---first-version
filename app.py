@@ -1,59 +1,78 @@
-# app.py - النسخة المستقرة بالكامل مع حل مشكلة الكاميرا والباركود والتكرار
+# app.py - النسخة النهائية المستقرة مع قراءة باركود قوية وإعادة محاولة
 import streamlit as st
 import pandas as pd
 from io import BytesIO
 from PIL import Image, ImageEnhance, ImageFilter
-import zxingcpp
 import google.generativeai as genai
 import json
 import re
 from datetime import datetime
+import cv2
+import numpy as np
 
 # ------------------- الإعدادات -------------------
 GEMINI_API_KEY = st.secrets["GEMINI_API_KEY"]
 genai.configure(api_key=GEMINI_API_KEY)
 
-# ------------------- دوال معالجة الباركود المحسنة -------------------
-def enhance_barcode_image(image):
-    """تحسين الصورة لقراءة الباركود"""
+# ------------------- دوال معالجة الباركود -------------------
+def preprocess_barcode_image(pil_image):
+    """تحسين الصورة لزيادة فرصة قراءة الباركود"""
     # تحويل إلى تدرج رمادي
-    gray = image.convert('L')
+    gray = pil_image.convert('L')
     # تحسين التباين
     enhancer = ImageEnhance.Contrast(gray)
-    enhanced = enhancer.enhance(3.0)  # زيادة التباين
-    # زيادة الحدة
-    sharp = enhanced.filter(ImageFilter.SHARPEN)
+    enhanced = enhancer.enhance(2.5)
     # تكبير الصورة
-    enlarged = sharp.resize((int(sharp.width * 2), int(sharp.height * 2)), Image.Resampling.LANCZOS)
-    return enlarged
+    scaled = enhanced.resize((int(enhanced.width * 1.5), int(enhanced.height * 1.5)), Image.Resampling.LANCZOS)
+    return scaled
 
-def scan_barcode_advanced(image):
-    """قراءة باركود مع معالجة متقدمة ومحاولات متعددة"""
-    if image is None:
-        return None
+def scan_barcode_with_cv2(pil_image):
+    """قراءة الباركود باستخدام OpenCV"""
     try:
-        # المحاولة الأولى: تحسين الصورة ثم القراءة
-        enhanced = enhance_barcode_image(image)
-        results = zxingcpp.read_barcodes(enhanced)
-        if results:
-            return results[0].text.strip()
-        
-        # المحاولة الثانية: الصورة الأصلية بعد تحسين التباين فقط
-        gray = image.convert('L')
-        enhancer = ImageEnhance.Contrast(gray)
-        enhanced2 = enhancer.enhance(2.5)
-        results = zxingcpp.read_barcodes(enhanced2)
-        if results:
-            return results[0].text.strip()
-        
-        # المحاولة الثالثة: الصورة الأصلية بدون تحسين
-        results = zxingcpp.read_barcodes(image)
-        if results:
-            return results[0].text.strip()
-            
-    except Exception as e:
-        st.warning(f"خطأ في مكتبة الباركود: {str(e)[:100]}")
+        img = np.array(pil_image.convert('RGB'))
+        img_bgr = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+        detector = cv2.barcode_BarcodeDetector()
+        ok, decoded_info, _ = detector.detectAndDecode(img_bgr)
+        if ok and decoded_info:
+            return decoded_info.strip()
+    except Exception:
+        pass
     return None
+
+def scan_barcode_with_pyzbar(pil_image):
+    """قراءة الباركود باستخدام pyzbar (بديل أخف)"""
+    try:
+        from pyzbar import pyzbar
+        decoded = pyzbar.decode(pil_image)
+        if decoded:
+            return decoded[0].data.decode('utf-8').strip()
+    except Exception:
+        pass
+    return None
+
+def scan_barcode_advanced(pil_image, method='auto'):
+    """وظيفة رئيسية لقراءة الباركود مع عدة محاولات"""
+    if pil_image is None:
+        return None
+    # تحسين الصورة أولاً
+    enhanced = preprocess_barcode_image(pil_image)
+    if method == 'cv2':
+        return scan_barcode_with_cv2(enhanced)
+    elif method == 'pyzbar':
+        return scan_barcode_with_pyzbar(enhanced)
+    else:
+        # auto: جرب كل الطرق
+        barcode = scan_barcode_with_cv2(enhanced)
+        if barcode:
+            return barcode
+        barcode = scan_barcode_with_pyzbar(enhanced)
+        if barcode:
+            return barcode
+        # تجربة على الصورة الأصلية بدون تحسين
+        barcode = scan_barcode_with_pyzbar(pil_image)
+        if barcode:
+            return barcode
+        return None
 
 # ------------------- دوال Gemini -------------------
 def analyze_with_gemini(product_img, price_tag_img):
@@ -64,8 +83,8 @@ def analyze_with_gemini(product_img, price_tag_img):
         "brand": "العلامة التجارية",
         "category": "Laptop/Printer/Accessory/Mobile Accessory",
         "description": "وصف قصير (أقل من 10 كلمات)",
-        "sku": "SKU مقترح (مثل LAP-001)",
-        "price_from_label": "السعر المستخرج من ملصق السعر (إن وجد، وإلا نص فارغ)"
+        "sku": "SKU مقترح مثل LAP-001",
+        "price_from_label": "السعر من ملصق السعر (إن وجد)"
     }
     """
     try:
@@ -79,7 +98,7 @@ def analyze_with_gemini(product_img, price_tag_img):
         if json_match:
             return json.loads(json_match.group())
     except Exception as e:
-        st.warning(f"⚠️ خطأ في Gemini: {str(e)[:100]}")
+        st.warning(f"⚠️ خطأ Gemini: {str(e)[:100]}")
     return {}
 
 # ------------------- دوال Excel -------------------
@@ -87,7 +106,8 @@ def create_excel(inventory):
     if not inventory:
         return None
     df = pd.DataFrame(inventory)
-    cols = ["SKU", "Product Name", "Brand", "Category", "Description", "Barcode", "Price", "Quantity", "Confidence", "Date Added"]
+    cols = ["SKU", "Product Name", "Brand", "Category", "Description",
+            "Barcode", "Price", "Quantity", "Confidence", "Date Added"]
     for c in cols:
         if c not in df.columns:
             df[c] = ""
@@ -99,31 +119,27 @@ def create_excel(inventory):
 
 # ------------------- دوال إدارة الجلسة -------------------
 def reset_for_new_product():
-    """إعادة ضبط كل شيء لإضافة منتج جديد مع الاحتفاظ بالمخزون السابق"""
     st.session_state.step = 0
     st.session_state.temp_images = [None, None, None]
     st.session_state.quantity = 1
     st.session_state.processed = False
     st.session_state.current_product_added = False
-    # زيادة عداد الكاميرا لإنشاء مفاتيح جديدة
+    st.session_state.barcode_failed = False
+    st.session_state.barcode_retry_method = None
+    st.session_state.barcode_image = None
+    st.session_state.manual_barcode = None
     st.session_state.camera_counter = st.session_state.get('camera_counter', 0) + 1
 
 def reset_full_session():
-    """مسح الجلسة بالكامل (المخزون وجميع المتغيرات)"""
     st.session_state.inventory = []
-    st.session_state.step = 0
-    st.session_state.temp_images = [None, None, None]
-    st.session_state.quantity = 1
-    st.session_state.processed = False
-    st.session_state.current_product_added = False
-    st.session_state.camera_counter = st.session_state.get('camera_counter', 0) + 1
+    reset_for_new_product()
 
 # ------------------- واجهة المستخدم -------------------
 st.set_page_config(page_title="AI Inventory Scanner", page_icon="📷", layout="centered")
 st.title("📷 AI Inventory Scanner - الإصدار الاحترافي")
 st.markdown("التقط 3 صور: **المنتج** ← **الباركود** ← **ملصق السعر**، ثم أدخل الكمية.")
 
-# تهيئة جميع متغيرات الجلسة
+# تهيئة حالة الجلسة
 if 'inventory' not in st.session_state:
     st.session_state.inventory = []
 if 'step' not in st.session_state:
@@ -136,6 +152,14 @@ if 'processed' not in st.session_state:
     st.session_state.processed = False
 if 'current_product_added' not in st.session_state:
     st.session_state.current_product_added = False
+if 'barcode_failed' not in st.session_state:
+    st.session_state.barcode_failed = False
+if 'barcode_retry_method' not in st.session_state:
+    st.session_state.barcode_retry_method = None
+if 'barcode_image' not in st.session_state:
+    st.session_state.barcode_image = None
+if 'manual_barcode' not in st.session_state:
+    st.session_state.manual_barcode = None
 if 'camera_counter' not in st.session_state:
     st.session_state.camera_counter = 0
 
@@ -145,7 +169,9 @@ with col2:
     if st.session_state.inventory:
         excel_data = create_excel(st.session_state.inventory)
         if excel_data:
-            st.download_button("📥 تحميل Excel", data=excel_data, file_name=f"inventory_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx", key="excel_top")
+            st.download_button("📥 تحميل Excel", data=excel_data,
+                               file_name=f"inventory_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
+                               key="excel_top")
     else:
         st.button("📥 Excel", disabled=True)
 with col3:
@@ -154,14 +180,14 @@ with col3:
         st.rerun()
 st.divider()
 
-# عرض المخزون الحالي أثناء الجرد
+# عرض المنتجات المضافة حالياً
 if st.session_state.inventory:
-    st.info(f"📦 المنتجات المضافة حتى الآن: **{len(st.session_state.inventory)}**")
+    st.info(f"📦 تم إضافة {len(st.session_state.inventory)} منتج حتى الآن")
     st.dataframe(pd.DataFrame(st.session_state.inventory), use_container_width=True)
     st.divider()
 
-# ------------------- الخطوات الرئيسية -------------------
-counter = st.session_state.camera_counter  # لإنشاء مفاتيح كاميرا فريدة
+# ------------------- الخطوات -------------------
+counter = st.session_state.camera_counter
 
 # الخطوة 0: صورة المنتج
 if st.session_state.step == 0:
@@ -176,31 +202,73 @@ if st.session_state.step == 0:
             st.session_state.step = 1
             st.rerun()
 
-# الخطوة 1: صورة الباركود
+# الخطوة 1: صورة الباركود مع إعادة محاولة
 elif st.session_state.step == 1:
     st.subheader("📊 صورة الباركود (قرّب الكاميرا)")
     st.caption("تأكد من الإضاءة الجيدة وتقريب الكاميرا من الباركود")
-    img = st.camera_input("التقط الصورة", key=f"cam_barcode_{counter}")
-    if img:
-        pil_img = Image.open(img)
-        pil_img.thumbnail((1024, 1024), Image.Resampling.LANCZOS)
-        st.session_state.temp_images[1] = pil_img
-        st.success("✅ تم الالتقاط!")
-        if st.button("➡️ التالي"):
-            st.session_state.step = 2
-            st.rerun()
 
-# الخطوة 2: صورة السعر
+    if st.session_state.barcode_failed and st.session_state.barcode_image:
+        st.error("❌ لم يتم قراءة الباركود في المحاولة السابقة.")
+        st.info("🔍 نصائح: إضاءة جيدة، تقريب الكاميرا، وضوح الباركود.")
+        col_a, col_b, col_c = st.columns(3)
+        with col_a:
+            if st.button("🔄 إعادة المحاولة (طريقة أخرى)"):
+                barcode = scan_barcode_advanced(st.session_state.barcode_image, method='pyzbar')
+                if barcode:
+                    st.success(f"✅ تم القراءة: {barcode}")
+                    st.session_state.temp_images[1] = st.session_state.barcode_image
+                    st.session_state.barcode_failed = False
+                    st.session_state.step = 2
+                    st.rerun()
+                else:
+                    st.error("فشلت المحاولة مرة أخرى. أدخل الباركود يدوياً.")
+                    manual = st.text_input("أدخل الباركود (أو اتركه فارغاً)")
+                    if st.button("✅ قبول"):
+                        st.session_state.manual_barcode = manual.strip()
+                        st.session_state.temp_images[1] = st.session_state.barcode_image
+                        st.session_state.barcode_failed = False
+                        st.session_state.step = 2
+                        st.rerun()
+        with col_b:
+            if st.button("📸 إعادة التقاط الصورة"):
+                st.session_state.barcode_failed = False
+                st.session_state.barcode_image = None
+                st.rerun()
+        with col_c:
+            if st.button("⏩ تخطي الباركود"):
+                st.session_state.temp_images[1] = None
+                st.session_state.barcode_failed = False
+                st.session_state.step = 2
+                st.rerun()
+    else:
+        img = st.camera_input("التقط الصورة", key=f"cam_barcode_{counter}")
+        if img:
+            pil_img = Image.open(img)
+            pil_img.thumbnail((1024, 1024), Image.Resampling.LANCZOS)
+            st.session_state.barcode_image = pil_img
+            with st.spinner("جاري قراءة الباركود..."):
+                barcode = scan_barcode_advanced(pil_img, method='auto')
+            if barcode:
+                st.success(f"✅ تم القراءة: {barcode}")
+                st.session_state.temp_images[1] = pil_img
+                st.session_state.barcode_failed = False
+                if st.button("➡️ التالي"):
+                    st.session_state.step = 2
+                    st.rerun()
+            else:
+                st.error("❌ لم يتم التعرف على الباركود. اضغط 'إعادة المحاولة' لاستخدام طريقة أخرى.")
+                st.session_state.barcode_failed = True
+                st.rerun()
+
+# الخطوة 2: صورة السعر (اختياري)
 elif st.session_state.step == 2:
-    st.subheader("🏷️ صورة ملصق السعر")
-    st.caption("اختياري: يمكنك تخطي هذه الخطوة لاحقاً")
+    st.subheader("🏷️ صورة ملصق السعر (اختياري)")
     img = st.camera_input("التقط الصورة (اختياري)", key=f"cam_price_{counter}")
     if img:
         pil_img = Image.open(img)
         pil_img.thumbnail((1024, 1024), Image.Resampling.LANCZOS)
         st.session_state.temp_images[2] = pil_img
         st.success("✅ تم الالتقاط!")
-    # زر التالي حتى بدون التقاط صورة السعر
     if st.button("➡️ التالي"):
         st.session_state.step = 3
         st.rerun()
@@ -208,23 +276,30 @@ elif st.session_state.step == 2:
 # الخطوة 3: إدخال الكمية
 elif st.session_state.step == 3:
     st.subheader("🔢 أدخل كمية المنتج")
-    quantity = st.number_input("الكمية المتوفرة:", min_value=0, step=1, value=st.session_state.quantity, key="quantity_input")
+    quantity = st.number_input("الكمية المتوفرة:", min_value=0, step=1, value=st.session_state.quantity)
     if st.button("✅ تأكيد وتحليل المنتج"):
         st.session_state.quantity = quantity
         st.session_state.step = 4
         st.rerun()
 
-# الخطوة 4: التحليل والإضافة (مرة واحدة فقط)
+# الخطوة 4: التحليل والإضافة
 elif st.session_state.step == 4 and not st.session_state.current_product_added:
     st.subheader("🔍 جاري التحليل...")
     prod_img = st.session_state.temp_images[0]
     bar_img = st.session_state.temp_images[1]
     price_img = st.session_state.temp_images[2]
-    
-    with st.spinner("قراءة الباركود وتحليل المنتج بالذكاء الاصطناعي..."):
-        barcode = scan_barcode_advanced(bar_img) if bar_img else None
+
+    # استرجاع الباركود (يدوي أو من الصورة)
+    barcode = None
+    if st.session_state.manual_barcode:
+        barcode = st.session_state.manual_barcode
+        st.session_state.manual_barcode = None
+    elif bar_img:
+        barcode = scan_barcode_advanced(bar_img)
+
+    with st.spinner("تحليل المنتج بالذكاء الاصطناعي..."):
         ai_result = analyze_with_gemini(prod_img, price_img) if prod_img else {}
-    
+
     # عرض النتائج
     col_left, col_right = st.columns(2)
     with col_left:
@@ -233,27 +308,26 @@ elif st.session_state.step == 4 and not st.session_state.current_product_added:
         if barcode:
             st.success(f"✅ الباركود: {barcode}")
         else:
-            st.warning("⚠️ لم يتم قراءة الباركود. تأكد من الإضاءة وتقريب الكاميرا.")
+            st.warning("⚠️ لم يتم قراءة الباركود. يمكنك الاستمرار بدون باركود.")
     with col_right:
         if ai_result:
             st.json(ai_result)
         else:
             st.error("❌ فشل تحليل Gemini. حاول مرة أخرى.")
-    
-    # منع التكرار: التحقق من وجود نفس الباركود أو SKU
+
+    # منع التكرار
     sku = ai_result.get('sku', 'ERR') if ai_result else 'ERR'
     duplicate = False
     for item in st.session_state.inventory:
-        if item.get('Barcode') == barcode and barcode and barcode != "لم يقرأ":
+        if barcode and item.get('Barcode') == barcode and barcode != "لم يقرأ":
             duplicate = True
-            st.warning(f"⚠️ هذا الباركود ({barcode}) موجود مسبقاً للمنتج '{item['Product Name']}'. لن تتم إضافة المنتج.")
+            st.warning(f"⚠️ الباركود {barcode} موجود مسبقاً للمنتج '{item['Product Name']}'. لن تتم الإضافة.")
             break
-        if item.get('SKU') == sku and sku != 'ERR':
-            duplicate = True
-            st.warning(f"⚠️ SKU '{sku}' موجود مسبقاً. تم تعديل SKU تلقائياً.")
+        if sku != 'ERR' and item.get('SKU') == sku:
+            st.warning(f"⚠️ SKU {sku} موجود مسبقاً. تم تعديله تلقائياً.")
             sku = f"{sku}_{len(st.session_state.inventory)+1}"
             break
-    
+
     if not duplicate:
         new_item = {
             "SKU": sku,
@@ -271,21 +345,18 @@ elif st.session_state.step == 4 and not st.session_state.current_product_added:
         st.session_state.current_product_added = True
         st.success(f"✅ تمت إضافة المنتج '{new_item['Product Name']}' بنجاح!")
     else:
-        st.session_state.current_product_added = True  # لمنع التكرار في إعادة التشغيل
-    
-    # زر لإضافة منتج آخر
+        st.session_state.current_product_added = True
+
     if st.button("➕ منتج آخر"):
         reset_for_new_product()
         st.rerun()
-    
-    # عرض جدول المخزون المحدث
+
     if st.session_state.inventory:
         st.subheader("📋 المخزون الحالي")
         st.dataframe(pd.DataFrame(st.session_state.inventory), use_container_width=True)
 
-# إذا تمت المعالجة سابقاً وأردنا إضافة منتج آخر من نفس الشاشة
 elif st.session_state.step == 4 and st.session_state.current_product_added:
-    st.subheader("✅ تمت إضافة المنتج بنجاح")
+    st.success("✅ تمت إضافة المنتج بنجاح")
     if st.button("➕ منتج آخر"):
         reset_for_new_product()
         st.rerun()
